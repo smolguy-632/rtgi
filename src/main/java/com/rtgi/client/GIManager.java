@@ -189,7 +189,10 @@ public final class GIManager {
             if (mx > 1f) { r /= mx; g /= mx; b /= mx; }
             byte rb = (byte) (int) (r * 255f + 0.5f), gb = (byte) (int) (g * 255f + 0.5f), bbyte = (byte) (int) (b * 255f + 0.5f);
             float nx = s.nrm[i * 4], ny = s.nrm[i * 4 + 1], nz = s.nrm[i * 4 + 2];
-            float cx = s.pos[i * 4] - nx * 0.507f, cy = s.pos[i * 4 + 1] - ny * 0.507f, cz = s.pos[i * 4 + 2] - nz * 0.507f;
+            // pos = block center + n * 0.51 (0.01 outside the face); put the quad ON the face plane
+            // (0.003 proud of it). Using ~0.507 here placed it at the block CENTER instead, i.e. a
+            // full -0.5 block offset from the surface it decorates.
+            float cx = s.pos[i * 4] - nx * 0.007f, cy = s.pos[i * 4 + 1] - ny * 0.007f, cz = s.pos[i * 4 + 2] - nz * 0.007f;
             float ux, uy, uz, vx, vy, vz;
             if (Math.abs(ny) > 0.5f) { ux = 0.5f; uy = 0; uz = 0; vx = 0; vy = 0; vz = 0.5f; }
             else if (Math.abs(nx) > 0.5f) { ux = 0; uy = 0.5f; uz = 0; vx = 0; vy = 0; vz = 0.5f; }
