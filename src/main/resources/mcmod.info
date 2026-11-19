@@ -1,0 +1,9 @@
+[{
+  "modid": "${modid}",
+  "name": "${modname}",
+  "description": "GPU (OpenCL) voxel ray traced global illumination: sparse 64-tree + Amanatides&Woo DDA, 1 mirror ray per surface voxel, inverse-square falloff, refreshed every N ticks. Client only. Works with Celeritas.",
+  "version": "${version}",
+  "mcversion": "${mcversion}",
+  "authorList": ["you"],
+  "dependencies": []
+}]
