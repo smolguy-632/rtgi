@@ -119,8 +119,8 @@ public final class GIEngine {
         cl_mem bIP = buf(IP, 4L * IP.length, CL_MEM_READ_ONLY);
         int[] outColor = new int[outW * outH];
         float[] outDepth = new float[outW * outH];
-        cl_mem bOutColor = buf(outColor, 4L * outColor.length, CL_MEM_WRITE_ONLY);
-        cl_mem bOutDepth = buf(outDepth, 4L * outDepth.length, CL_MEM_WRITE_ONLY);
+        cl_mem bOutColor = buf(null, 4L * outColor.length, CL_MEM_WRITE_ONLY);
+        cl_mem bOutDepth = buf(null, 4L * outDepth.length, CL_MEM_WRITE_ONLY);
 
         int a = 0;
         clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bMasks));
@@ -142,8 +142,15 @@ public final class GIEngine {
         clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bOutDepth));
 
         clEnqueueNDRangeKernel(queue, kernel, 1, null, new long[]{(long) outW * outH}, null, 0, null, null);
-        clEnqueueReadBuffer(queue, bOutColor, true, 0, 4L * outColor.length, Pointer.to(outColor), 0, null, null);
-        clEnqueueReadBuffer(queue, bOutDepth, true, 0, 4L * outDepth.length, Pointer.to(outDepth), 0, null, null);
+        java.nio.ByteBuffer cbuf = org.lwjgl.BufferUtils.createByteBuffer(outColor.length * 4);
+        java.nio.ByteBuffer dbuf = org.lwjgl.BufferUtils.createByteBuffer(outDepth.length * 4);
+        clEnqueueReadBuffer(queue, bOutColor, true, 0, 4L * outColor.length, Pointer.to(cbuf), 0, null, null);
+        clEnqueueReadBuffer(queue, bOutDepth, true, 0, 4L * outDepth.length, Pointer.to(dbuf), 0, null, null);
+        cbuf.flip(); dbuf.flip();
+        java.nio.IntBuffer ci = cbuf.asIntBuffer();
+        java.nio.FloatBuffer di = dbuf.asFloatBuffer();
+        for (int i = 0; i < outColor.length; i++) outColor[i] = ci.get(i);
+        for (int i = 0; i < outDepth.length; i++) outDepth[i] = di.get(i);
 
         Result r = new Result();
         r.w = outW; r.h = outH; r.color = outColor; r.depth = outDepth;

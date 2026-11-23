@@ -27,8 +27,9 @@ public final class RTOverlay {
         int[] flipped = new int[color.length];
         for (int y = 0; y < h; y++)
             System.arraycopy(color, y * w, flipped, (h - 1 - y) * w, w);
-        java.nio.IntBuffer fbuf = org.lwjgl.BufferUtils.createIntBuffer(flipped.length);
-        fbuf.put(flipped); fbuf.flip();
+        java.nio.ByteBuffer fbuf = org.lwjgl.BufferUtils.createByteBuffer(flipped.length * 4);
+        for (int v : flipped) { fbuf.put((byte)(v & 0xFF)); fbuf.put((byte)((v>>8)&0xFF)); fbuf.put((byte)((v>>16)&0xFF)); fbuf.put((byte)((v>>24)&0xFF)); }
+        fbuf.flip();
         GL11.glTexImage2D(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, w, h, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, fbuf);
         GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
     }
