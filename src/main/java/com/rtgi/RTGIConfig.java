@@ -7,7 +7,7 @@ public class RTGIConfig {
     @Config.Comment("Master switch.")
     public static boolean enabled = true;
 
-    @Config.Comment("Run one GI pass every N client ticks (20 ticks = 1 second). Higher = cheaper, laggier lighting.")
+    @Config.Comment("Run one RT pass every N client ticks (20 ticks = 1 second). Higher = cheaper, laggier lighting.")
     @Config.RangeInt(min = 1, max = 200)
     public static int refreshIntervalTicks = 10;
 
@@ -19,13 +19,22 @@ public class RTGIConfig {
     @Config.RangeInt(min = 2, max = 8)
     public static int radiusChunks = 8;
 
-    @Config.Comment("Upper bound on surface voxels (= rays) per pass. Extra voxels are skipped evenly.")
-    @Config.RangeInt(min = 1000, max = 1000000)
-    public static int maxSamples = 250000;
+    @Config.Comment("Render scale of the raytraced image (0.25-1.0). Lower = faster on weak GPUs.")
+    @Config.RangeDouble(min = 0.25, max = 1.0)
+    public static double renderScale = 0.5;
 
-    @Config.Comment("Max ray length in blocks. Light falls off with 1/d^2 anyway.")
+    @Config.Comment("Max ray length in blocks.")
     @Config.RangeDouble(min = 8, max = 256)
     public static double maxRayDistance = 64;
+
+    @Config.Comment("Sun shadows (1 shadow ray per hit).")
+    public static boolean sunShadows = true;
+
+    @Config.Comment("Water mirror reflection + refraction.")
+    public static boolean waterReflection = true;
+
+    @Config.Comment("Block-light (torch) shadows via emitter list.")
+    public static boolean blockShadows = true;
 
     @Config.Comment("Brightness multiplier of the added light.")
     @Config.RangeDouble(min = 0, max = 8)

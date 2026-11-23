@@ -10,7 +10,7 @@ import java.util.Arrays;
 public final class Tree64 {
     public long[] masks;
     public int[] ptrs;
-    public byte[] mats;
+    public short[] mats;
     public int nodeCount;
 
     private final VoxelVolume vol;
@@ -18,7 +18,7 @@ public final class Tree64 {
     private final long[][] lm = new long[4][];
     private final int[][] lp = new int[4][];
     private final int[] ln = new int[4];
-    private byte[] mb = new byte[1 << 14];
+    private short[] mb = new short[1 << 14];
     private int mn;
 
     private Tree64(VoxelVolume vol, int ox, int oz) {
@@ -52,7 +52,7 @@ public final class Tree64 {
                     int bit = cx + (cy << 2) + (cz << 4);
                     int x = x0 + cx * cs, y = y0 + cy * cs, z = z0 + cz * cs;
                     if (level == 0) {
-                        byte m = vol.cells[VoxelVolume.cellIndex(ox + x, y, oz + z)];
+                        short m = vol.cells[VoxelVolume.cellIndex(ox + x, y, oz + z)];
                         if (m != 0) {
                             mask |= 1L << bit;
                             if (mn == mb.length) mb = Arrays.copyOf(mb, mb.length * 2);

@@ -9,7 +9,7 @@ import java.util.List;
 
 import static org.jocl.CL.*;
 
-/** OpenCL host side (JOCL: works on Forge/LWJGL2 and Cleanroom/LWJGL3). Used from ONE worker thread only. */
+/** OpenCL host side (JOCL). Used from ONE worker thread only. */
 public final class GIEngine {
     public final String deviceName;
     private final cl_context ctx;
@@ -17,19 +17,7 @@ public final class GIEngine {
     private final cl_program program;
     private final cl_kernel kernel;
 
-    private final Buf bMasks, bPtrs, bMats, bPos, bNrm, bOut;
-
-    private final class Buf {
-        cl_mem mem; long cap; final long flags;
-        Buf(long flags) { this.flags = flags; }
-        void ensure(long need) {
-            if (mem != null && need <= cap) return;
-            if (mem != null) clReleaseMemObject(mem);
-            long c = Math.max(need, 4096L); c += c >> 2;
-            mem = clCreateBuffer(ctx, flags, c, null, null);
-            cap = c;
-        }
-    }
+    private final List<cl_mem> allocs = new ArrayList<cl_mem>();
 
     private GIEngine(cl_platform_id plat, cl_device_id dev, String name) throws Exception {
         this.deviceName = name;
@@ -39,9 +27,7 @@ public final class GIEngine {
         queue = clCreateCommandQueue(ctx, dev, 0, null);
         program = clCreateProgramWithSource(ctx, 1, new String[]{readKernel()}, null, null);
         clBuildProgram(program, 0, null, null, null, null);
-        kernel = clCreateKernel(program, "gi_tree64", null);
-        bMasks = new Buf(CL_MEM_READ_ONLY); bPtrs = new Buf(CL_MEM_READ_ONLY); bMats = new Buf(CL_MEM_READ_ONLY);
-        bPos = new Buf(CL_MEM_READ_ONLY); bNrm = new Buf(CL_MEM_READ_ONLY); bOut = new Buf(CL_MEM_WRITE_ONLY);
+        kernel = clCreateKernel(program, "render", null);
     }
 
     private static String readKernel() throws Exception {
@@ -88,36 +74,79 @@ public final class GIEngine {
         return new GIEngine(lp.get(i), ld.get(i), ln.get(i));
     }
 
-    private void write(Buf b, Pointer p, long bytes) {
-        b.ensure(bytes);
-        clEnqueueWriteBuffer(queue, b.mem, true, 0, bytes, p, 0, null, null);
+    private cl_mem buf(Object src, long bytes, long flags) {
+        cl_mem m = clCreateBuffer(ctx, flags, Math.max(bytes, 4), null, null);
+        allocs.add(m);
+        if (src != null) {
+            Pointer p;
+            if (src instanceof long[]) p = Pointer.to((long[]) src);
+            else if (src instanceof int[]) p = Pointer.to((int[]) src);
+            else if (src instanceof short[]) p = Pointer.to((short[]) src);
+            else if (src instanceof float[]) p = Pointer.to((float[]) src);
+            else if (src instanceof byte[]) p = Pointer.to((byte[]) src);
+            else throw new IllegalArgumentException();
+            clEnqueueWriteBuffer(queue, m, true, 0, bytes, p, 0, null, null);
+        }
+        return m;
     }
 
-    /** @return float4 per sample: rgb light, w = hit distance (-1 = sky). */
-    public float[] run(Tree64 t, float[] pos, float[] nrm, int n,
-                       float camx, float camy, float camz, float maxDist,
-                       float skyr, float skyg, float skyb, float ambient) {
-        write(bMasks, Pointer.to(t.masks), 8L * t.nodeCount);
-        write(bPtrs, Pointer.to(t.ptrs), 4L * t.nodeCount);
-        write(bMats, Pointer.to(t.mats), t.mats.length);
-        write(bPos, Pointer.to(pos), 16L * n);
-        write(bNrm, Pointer.to(nrm), 16L * n);
-        bOut.ensure(16L * n);
+    public static final class Result { public int w, h; public int[] color; public float[] depth; }
+
+    /** Run the full-scene RT kernel. */
+    public Result run(Tree64 t, VoxelVolume vol, BlockPalette pal, int[] colTint,
+                     int[] emHead, int[] emNext, float[] emPos, int emitterCount,
+                     int[] atlas, int atlasW, int atlasH,
+                     float[] P, int[] IP, int outW, int outH) throws Exception {
+        // release previous
+        for (cl_mem m : allocs) try { clReleaseMemObject(m); } catch (Throwable ignore) {}
+        allocs.clear();
+
+        long nodeCount = t.nodeCount;
+        cl_mem bMasks = buf(t.masks, 8L * nodeCount, CL_MEM_READ_ONLY);
+        cl_mem bPtrs = buf(t.ptrs, 4L * nodeCount, CL_MEM_READ_ONLY);
+        cl_mem bMats = buf(t.mats, 2L * t.mats.length, CL_MEM_READ_ONLY);
+        cl_mem bPalFlags = buf(pal.flags, 4L * (pal.maxId() + 1), CL_MEM_READ_ONLY);
+        cl_mem bPalUV = buf(pal.uv, 4L * (pal.maxId() + 1) * 24, CL_MEM_READ_ONLY);
+        cl_mem bPalTint = buf(pal.tint, 4L * (pal.maxId() + 1) * 6, CL_MEM_READ_ONLY);
+        cl_mem bPalBox = buf(pal.box, 4L * (pal.maxId() + 1) * 8, CL_MEM_READ_ONLY);
+        cl_mem bLight = buf(vol.light, vol.light.length, CL_MEM_READ_ONLY);
+        cl_mem bColTint = buf(colTint, 4L * colTint.length, CL_MEM_READ_ONLY);
+        cl_mem bEmHead = buf(emHead, 4L * emHead.length, CL_MEM_READ_ONLY);
+        cl_mem bEmNext = buf(emNext, 4L * emNext.length, CL_MEM_READ_ONLY);
+        cl_mem bEmPos = buf(emPos, 4L * Math.max(1, emitterCount * 4), CL_MEM_READ_ONLY);
+        cl_mem bAtlas = buf(atlas, 4L * atlas.length, CL_MEM_READ_ONLY);
+        cl_mem bP = buf(P, 4L * P.length, CL_MEM_READ_ONLY);
+        cl_mem bIP = buf(IP, 4L * IP.length, CL_MEM_READ_ONLY);
+        int[] outColor = new int[outW * outH];
+        float[] outDepth = new float[outW * outH];
+        cl_mem bOutColor = buf(outColor, 4L * outColor.length, CL_MEM_WRITE_ONLY);
+        cl_mem bOutDepth = buf(outDepth, 4L * outDepth.length, CL_MEM_WRITE_ONLY);
 
         int a = 0;
-        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bMasks.mem));
-        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPtrs.mem));
-        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bMats.mem));
-        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPos.mem));
-        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bNrm.mem));
-        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bOut.mem));
-        clSetKernelArg(kernel, a++, Sizeof.cl_int, Pointer.to(new int[]{n}));
-        float[] f = {camx, camy, camz, maxDist, skyr, skyg, skyb, ambient};
-        for (float v : f) clSetKernelArg(kernel, a++, Sizeof.cl_float, Pointer.to(new float[]{v}));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bMasks));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPtrs));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bMats));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPalFlags));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPalUV));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPalTint));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bPalBox));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bLight));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bColTint));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bEmHead));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bEmNext));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bEmPos));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bAtlas));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bP));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bIP));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bOutColor));
+        clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bOutDepth));
 
-        clEnqueueNDRangeKernel(queue, kernel, 1, null, new long[]{n}, null, 0, null, null);
-        float[] out = new float[4 * n];
-        clEnqueueReadBuffer(queue, bOut.mem, true, 0, 16L * n, Pointer.to(out), 0, null, null);
-        return out;
+        clEnqueueNDRangeKernel(queue, kernel, 1, null, new long[]{(long) outW * outH}, null, 0, null, null);
+        clEnqueueReadBuffer(queue, bOutColor.mem, true, 0, 4L * outColor.length, Pointer.to(outColor), 0, null, null);
+        clEnqueueReadBuffer(queue, bOutDepth.mem, true, 0, 4L * outDepth.length, Pointer.to(outDepth), 0, null, null);
+
+        Result r = new Result();
+        r.w = outW; r.h = outH; r.color = outColor; r.depth = outDepth;
+        return r;
     }
 }

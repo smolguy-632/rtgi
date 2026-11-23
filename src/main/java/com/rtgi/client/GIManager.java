@@ -4,22 +4,19 @@ import com.rtgi.RTGIConfig;
 import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.entity.Entity;
-import net.minecraft.entity.player.EntityPlayer;
-import net.minecraft.util.SoundCategory;
-import net.minecraft.util.SoundEvent;
 import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.math.MathHelper;
 import net.minecraft.world.IWorldEventListener;
 import net.minecraft.world.World;
+import net.minecraft.world.biome.Biome;
 import net.minecraftforge.client.event.RenderWorldLastEvent;
 import net.minecraftforge.event.world.WorldEvent;
 import net.minecraftforge.fml.common.eventhandler.SubscribeEvent;
 import net.minecraftforge.fml.common.gameevent.TickEvent;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
+import org.lwjgl.opengl.GL11;
 
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
 import java.util.Arrays;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -27,46 +24,40 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-/**
- * Schedules GI passes. The main thread only mirrors blocks into the voxel volume (time-sliced) and, every
- * N ticks, hands a job to a worker thread: build 64-tree -> pick 1 surface face per voxel -> OpenCL trace
- * (1 mirror ray each) -> build quad buffer. The render thread just uploads the finished buffer.
- */
 public final class GIManager {
-    public static final class Result { int originX, originZ, quadCount; ByteBuffer quads; }
-
-    private static final class Params {
-        int ox, oz, maxSamples, radiusChunks, device; boolean skipD3D12;
-        float camx, camy, camz, maxDist, strength, sky, ambient;
-    }
-    private static final class Samples { float[] pos, nrm; int n; }
+    public static final class RTResult { public int w, h; public int[] color; }
 
     private static final Logger LOG = LogManager.getLogger("RTGI");
-    private static final int[][] N = {{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
 
     private final VoxelVolume vol = new VoxelVolume();
-    private final GIOverlay overlay = new GIOverlay();
+    private final BlockPalette palette = new BlockPalette();
+    private final RTOverlay overlay = new RTOverlay();
     private final AtomicBoolean busy = new AtomicBoolean();
-    private final AtomicReference<Result> pending = new AtomicReference<Result>();
+    private final AtomicReference<RTResult> pending = new AtomicReference<RTResult>();
     private final ExecutorService pool = Executors.newSingleThreadExecutor(new ThreadFactory() {
         public Thread newThread(Runnable r) { Thread t = new Thread(r, "RTGI-Worker"); t.setDaemon(true); return t; }
     });
     private final IWorldEventListener listener = new Listener();
+
     private GIEngine engine;
     private volatile boolean disabled;
-    private int failures, tickCounter, stride = 1;
-    private long jobs;
+    private int failures, tickCounter;
     private World lastWorld;
 
-    // ------------------------------------------------------------------ events (main/render thread)
+    private volatile float[] lastProj, lastModel;
+    private volatile float lastPartialTicks;
+    private volatile int lastOriginX, lastOriginZ;
+
+    public GIManager() { vol.palette = palette; }
+
     @SubscribeEvent
     public void onWorldLoad(WorldEvent.Load e) {
-        if (e.getWorld().isRemote) e.getWorld().addEventListener(listener);
+        if (e.getWorld().isRemote) { e.getWorld().addEventListener(listener); vol.palette = palette; }
     }
 
     @SubscribeEvent
     public void onWorldUnload(WorldEvent.Unload e) {
-        if (e.getWorld().isRemote) { e.getWorld().removeEventListener(listener); overlay.clear(); }
+        if (e.getWorld().isRemote) { e.getWorld().removeEventListener(listener); overlay.clear(); vol.reset(); }
     }
 
     @SubscribeEvent
@@ -75,56 +66,170 @@ public final class GIManager {
         Minecraft mc = Minecraft.getMinecraft();
         if (!RTGIConfig.enabled || mc.world == null || mc.player == null) return;
         if (mc.world != lastWorld) {
-            lastWorld = mc.world; vol.reset(); overlay.clear(); pending.set(null); tickCounter = 0;
+            lastWorld = mc.world; vol.reset(); vol.palette = palette; overlay.clear(); pending.set(null); tickCounter = 0;
         }
         int pcx = MathHelper.floor(mc.player.posX) >> 4, pcz = MathHelper.floor(mc.player.posZ) >> 4;
         vol.recenter(pcx, pcz);
         vol.scan(mc.world, RTGIConfig.scanSectionsPerTick, pcx, pcz, RTGIConfig.radiusChunks);
 
-        // GI passes only run every N ticks, and never overlap.
         if (++tickCounter >= RTGIConfig.refreshIntervalTicks && busy.compareAndSet(false, true)) {
             tickCounter = 0;
-            final Params p = new Params();
-            p.ox = vol.originX; p.oz = vol.originZ;
+            final int ox = vol.originX, oz = vol.originZ;
+            lastOriginX = ox; lastOriginZ = oz;
             Entity eye = mc.getRenderViewEntity() != null ? mc.getRenderViewEntity() : mc.player;
-            p.camx = (float) (eye.posX - p.ox); p.camy = (float) (eye.posY + eye.getEyeHeight()); p.camz = (float) (eye.posZ - p.oz);
-            p.maxSamples = RTGIConfig.maxSamples; p.radiusChunks = RTGIConfig.radiusChunks;
-            p.device = RTGIConfig.openclDevice; p.skipD3D12 = RTGIConfig.skipD3D12Devices;
-            p.maxDist = (float) RTGIConfig.maxRayDistance; p.strength = (float) RTGIConfig.strength;
-            p.sky = (float) RTGIConfig.skyContribution; p.ambient = p.sky * 0.4f;
-            pool.execute(new Runnable() { public void run() { runJob(p); } });
+            final float camx = (float) (eye.posX - ox);
+            final float camy = (float) (eye.posY + eye.getEyeHeight());
+            final float camz = (float) (eye.posZ - oz);
+            final float maxDist = (float) RTGIConfig.maxRayDistance;
+            final float[] proj = lastProj, model = lastModel;
+            final float pt = lastPartialTicks;
+            pool.execute(new Runnable() { public void run() {
+                runJob(ox, oz, camx, camy, camz, maxDist, proj, model, pt, mc.world);
+            } });
         }
     }
 
     @SubscribeEvent
     public void onRenderWorldLast(RenderWorldLastEvent e) {
         if (!RTGIConfig.enabled || disabled) return;
-        Result r = pending.getAndSet(null);
-        if (r != null) overlay.upload(r);
-        overlay.draw(e.getPartialTicks());
+        // capture matrices for next job
+        float[] p = new float[16], m = new float[16];
+        GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, java.nio.FloatBuffer.wrap(p));
+        GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, java.nio.FloatBuffer.wrap(m));
+        lastProj = p; lastModel = m; lastPartialTicks = e.getPartialTicks();
+        RTResult r = pending.getAndSet(null);
+        if (r != null) overlay.upload(r.color, r.w, r.h);
+        overlay.draw();
     }
 
-    // ------------------------------------------------------------------ worker thread
-    private void runJob(Params p) {
+    private void runJob(int ox, int oz, float camx, float camy, float camz, float maxDist,
+                        float[] proj, float[] model, float pt, World world) {
         try {
             if (engine == null) {
-                engine = GIEngine.create(p.device, p.skipD3D12);
+                engine = GIEngine.create(RTGIConfig.openclDevice, RTGIConfig.skipD3D12Devices);
                 LOG.info("RT GI using OpenCL device: {}", engine.deviceName);
             }
+            if (proj == null || model == null) { busy.set(false); return; }
+
             long t0 = System.nanoTime();
-            Tree64 tree = Tree64.build(vol, p.ox, p.oz);
+            Tree64 tree = Tree64.build(vol, ox, oz);
             long t1 = System.nanoTime();
-            Samples s = buildSamples(p);
+
+            // colTint: 3 rows x 256 columns
+            int[] colTint = new int[3 * 256];
+            for (int sx = 0; sx < 16; sx++) for (int sz = 0; sz < 16; sz++) {
+                int slot = sx | (sz << 4);
+                int wx = ox + sx * 16 + 8, wz = oz + sz * 16 + 8;
+                int wy = 64;
+                try { wy = (int) Minecraft.getMinecraft().player.posY; } catch (Throwable ignore) {}
+                Biome biome = world.getBiome(new BlockPos(wx, wy, wz));
+                int grass = 0, foliage = 0, water = 0;
+                try { grass = net.minecraft.client.renderer.BiomeColors.getGrassColor(world, new BlockPos(wx, wy, wz)); } catch (Throwable ignore) {}
+                try { foliage = net.minecraft.client.renderer.BiomeColors.getFoliageColor(world, new BlockPos(wx, wy, wz)); } catch (Throwable ignore) {}
+                try { water = net.minecraft.client.renderer.BiomeColors.getWaterColor(world, new BlockPos(wx, wy, wz)); } catch (Throwable ignore) {}
+                colTint[0 * 256 + slot] = grass;
+                colTint[1 * 256 + slot] = foliage;
+                colTint[2 * 256 + slot] = water;
+            }
             long t2 = System.nanoTime();
-            float[] out = s.n == 0 ? new float[0]
-                    : engine.run(tree, s.pos, s.nrm, s.n, p.camx, p.camy, p.camz, p.maxDist,
-                                 0.5f * p.sky, 0.7f * p.sky, 1.0f * p.sky, p.ambient);
+
+            // emitters
+            int[] emHead = new int[4096];
+            Arrays.fill(emHead, -1);
+            java.util.ArrayList<Integer> nextList = new java.util.ArrayList<Integer>();
+            java.util.ArrayList<Float> posList = new java.util.ArrayList<Float>();
+            for (int x = 0; x < 256; x++) for (int y = 0; y < 256; y++) for (int z = 0; z < 256; z++) {
+                short cell = (short) (vol.cells[VoxelVolume.cellIndex(ox + x, y, oz + z)] & 0x7fff);
+                if (cell == 0) continue;
+                if ((palette.flags[cell] & BlockPalette.F_EMIT) == 0) continue;
+                int level = palette.emitLevel[cell];
+                if (level <= 0) continue;
+                int sx = x >> 4, sy = y >> 4, sz = z >> 4;
+                int slot = (sx << 8) | (sy << 4) | sz;
+                int idx = posList.size() / 4;
+                nextList.add(emHead[slot]);
+                emHead[slot] = idx;
+                posList.add((float) x); posList.add((float) y); posList.add((float) z); posList.add((float) level);
+            }
+            int emitterCount = posList.size() / 4;
+            int[] emNext = new int[Math.max(1, emitterCount)];
+            float[] emPos = new float[Math.max(4, emitterCount * 4)];
+            for (int i = 0; i < emitterCount; i++) {
+                emNext[i] = nextList.get(i);
+                emPos[i * 4] = posList.get(i * 4);
+                emPos[i * 4 + 1] = posList.get(i * 4 + 1);
+                emPos[i * 4 + 2] = posList.get(i * 4 + 2);
+                emPos[i * 4 + 3] = posList.get(i * 4 + 3);
+            }
             long t3 = System.nanoTime();
-            pending.set(buildQuads(p, s, out));
+
+            // atlas
+            int[] atlas = captureAtlas();
+            int atlasW = 1, atlasH = 1;
+            try {
+                net.minecraft.client.renderer.texture.TextureMap tm =
+                        (net.minecraft.client.renderer.texture.TextureMap) Minecraft.getMinecraft().getTextureManager()
+                                .getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+                atlasW = tm.getWidth(); atlasH = tm.getHeight();
+            } catch (Throwable ignore) {}
+            if (atlas == null || atlas.length == 0) { atlas = new int[]{0}; atlasW = 1; atlasH = 1; }
+
+            // render scale
+            int outW = Math.max(64, (int) (Minecraft.getMinecraft().displayWidth * RTGIConfig.renderScale));
+            int outH = Math.max(64, (int) (Minecraft.getMinecraft().displayHeight * RTGIConfig.renderScale));
+
+            // matrices: VP = proj * model (column-major), invVP
+            float[] VP = mulMat4(proj, model);
+            float[] invVP = invertMat4(VP);
+
+            // P block (57 floats)
+            float[] P = new float[57];
+            System.arraycopy(invVP, 0, P, 0, 16);
+            System.arraycopy(VP, 0, P, 16, 16);
+            P[32] = camx; P[33] = camy; P[34] = camz;
+            // sun dir
+            float angle = (world != null) ? world.getCelestialAngle(pt) : 0.5f;
+            float theta = angle * (float) (Math.PI * 2);
+            P[35] = (float) (-Math.sin(theta)); P[36] = (float) Math.cos(theta); P[37] = 0f;
+            // sun color
+            float sunB = (world != null) ? world.getSunBrightness(pt) : 1f;
+            P[38] = sunB; P[39] = sunB * 0.96f; P[40] = sunB * 0.9f;
+            // zenith
+            net.minecraft.util.math.Vec3d sky = (world != null) ? world.getSkyColor(Minecraft.getMinecraft().player, pt) : new net.minecraft.util.math.Vec3d(0.5,0.7,1.0);
+            P[41] = (float) sky.x; P[42] = (float) sky.y; P[43] = (float) sky.z;
+            // fog
+            net.minecraft.util.math.Vec3d fog = (world != null) ? world.getFogColor(pt) : new net.minecraft.util.math.Vec3d(0.7,0.8,1.0);
+            P[44] = (float) fog.x; P[45] = (float) fog.y; P[46] = (float) fog.z;
+            int rd = Minecraft.getMinecraft().gameSettings.renderDistanceChunks;
+            float fogEnd = rd * 16f;
+            P[47] = fogEnd * 0.5f; // fogStart
+            P[48] = fogEnd;         // fogEnd
+            P[49] = (world != null) ? (float) (world.getTotalWorldTime() + pt) : 0f; // time
+            P[50] = maxDist;        // maxDist
+            P[51] = Math.min(maxDist, 32f); // shadowDist
+            P[52] = 0.1f;           // wave
+            P[53] = sunB * 0.4f;    // skyAmb
+            P[54] = 0.3f;           // blkDark
+            P[55] = RTGIConfig.sunShadows ? 1f : 0f;
+            P[56] = RTGIConfig.waterReflection ? 1f : 0f;
+
+            int[] IP = new int[7];
+            IP[0] = outW; IP[1] = outH; IP[2] = ox; IP[3] = oz;
+            IP[4] = atlasW; IP[5] = atlasH; IP[6] = RTGIConfig.blockShadows ? 1 : 0;
+
+            long t4 = System.nanoTime();
+            GIEngine.Result res = engine.run(tree, vol, palette, colTint, emHead, emNext, emPos, emitterCount,
+                    atlas, atlasW, atlasH, P, IP, outW, outH);
+            long t5 = System.nanoTime();
+
+            RTResult r = new RTResult();
+            r.w = res.w; r.h = res.h; r.color = res.color;
+            pending.set(r);
             failures = 0;
-            if (RTGIConfig.debugLog && (++jobs % 100) == 1)
-                LOG.info("pass: tree {} ms ({} nodes), samples {} ms ({} rays), gpu {} ms, quads {} ms",
-                        (t1 - t0) / 1e6, tree.nodeCount, (t2 - t1) / 1e6, s.n, (t3 - t2) / 1e6, (System.nanoTime() - t3) / 1e6);
+            if (RTGIConfig.debugLog) {
+                LOG.info("RT pass: tree {}ms ({} nodes), colTint {}ms, emitters {}ms ({}), gpu+read {}ms, upload-pending",
+                        (t1 - t0) / 1e6, tree.nodeCount, (t2 - t1) / 1e6, (t3 - t2) / 1e6, emitterCount, (t5 - t4) / 1e6);
+            }
         } catch (Throwable t) {
             LOG.error("RT GI pass failed", t);
             if (engine == null || ++failures >= 3) { disabled = true; LOG.error("RT GI disabled for this session."); }
@@ -133,100 +238,96 @@ public final class GIManager {
         }
     }
 
-    /** Exactly one sample per exposed solid voxel: the exposed face that points most toward the camera. */
-    private Samples buildSamples(Params p) {
-        int cap = Math.min(p.maxSamples, 1 << 16);
-        float[] pos = new float[cap * 4], nrm = new float[cap * 4];
-        int n = 0, total = 0, st = stride;
-        float rad = p.radiusChunks * 16 + 16;
-        byte[] cells = vol.cells;
-        for (int sx = 0; sx < 16; sx++) for (int sz = 0; sz < 16; sz++) {
-            float dx = sx * 16 + 8 - p.camx, dz = sz * 16 + 8 - p.camz;
-            if (dx * dx + dz * dz > rad * rad) continue;
-            for (int sy = 0; sy < 16; sy++) {
-                if (vol.sectionCount[VoxelVolume.secIndex(p.ox + sx * 16, sy * 16, p.oz + sz * 16)] == 0) continue;
-                for (int lx = 0; lx < 16; lx++) for (int ly = 0; ly < 16; ly++) for (int lz = 0; lz < 16; lz++) {
-                    int x = sx * 16 + lx, y = sy * 16 + ly, z = sz * 16 + lz;
-                    if (cells[VoxelVolume.cellIndex(p.ox + x, y, p.oz + z)] != 1) continue;
-                    float tx = p.camx - (x + 0.5f), ty = p.camy - (y + 0.5f), tz = p.camz - (z + 0.5f);
-                    float inv = 1.0f / (float) (Math.sqrt(tx * tx + ty * ty + tz * tz) + 1e-6);
-                    int bf = -1; float best = -9f;
-                    for (int f = 0; f < 6; f++) {
-                        int nx = x + N[f][0], ny = y + N[f][1], nz = z + N[f][2];
-                        byte m2;
-                        if (ny < 0) m2 = 1;
-                        else if (ny > 255) m2 = 0;
-                        else if (nx < 0 || nx > 255 || nz < 0 || nz > 255) m2 = 1;   // outside window counts as solid
-                        else m2 = cells[VoxelVolume.cellIndex(p.ox + nx, ny, p.oz + nz)];
-                        if (m2 == 1) continue;                                       // not exposed
-                        float score = (N[f][0] * tx + N[f][1] * ty + N[f][2] * tz) * inv;
-                        if (score > best) { best = score; bf = f; }
-                    }
-                    if (bf < 0) continue;
-                    total++;
-                    if (st > 1 && (((x * 73856093) ^ (y * 19349663) ^ (z * 83492791)) & 0x7fffffff) % st != 0) continue;
-                    if (n >= p.maxSamples) continue;
-                    if (n == cap) { cap = Math.min(cap * 2, p.maxSamples); pos = Arrays.copyOf(pos, cap * 4); nrm = Arrays.copyOf(nrm, cap * 4); }
-                    int o = n * 4;
-                    pos[o] = x + 0.5f + N[bf][0] * 0.51f; pos[o + 1] = y + 0.5f + N[bf][1] * 0.51f; pos[o + 2] = z + 0.5f + N[bf][2] * 0.51f;
-                    nrm[o] = N[bf][0]; nrm[o + 1] = N[bf][1]; nrm[o + 2] = N[bf][2];
-                    n++;
-                }
+    private static float[] mulMat4(float[] a, float[] b) {
+        float[] r = new float[16];
+        for (int i = 0; i < 4; i++)
+            for (int j = 0; j < 4; j++) {
+                float s = 0;
+                for (int k = 0; k < 4; k++) s += a[i + k * 4] * b[k + j * 4];
+                r[i + j * 4] = s;
+            }
+        return r;
+    }
+
+    private static float[] invertMat4(float[] m) {
+        float[] a = new float[16];
+        System.arraycopy(m, 0, a, 0, 16);
+        // augment
+        float[] inv = new float[16];
+        // gaussian elimination on [m | I]
+        float[][] M = new float[4][8];
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) { M[i][j] = a[i + j * 4]; M[i][j + 4] = (i == j) ? 1f : 0f; }
+        for (int col = 0; col < 4; col++) {
+            // pivot
+            int piv = col;
+            float best = Math.abs(M[col][col]);
+            for (int r = col + 1; r < 4; r++) if (Math.abs(M[r][col]) > best) { best = Math.abs(M[r][col]); piv = r; }
+            if (best < 1e-12f) return new float[16]; // singular
+            if (piv != col) { float[] tmp = M[col]; M[col] = M[piv]; M[piv] = tmp; }
+            float pv = M[col][col];
+            for (int j = 0; j < 8; j++) M[col][j] /= pv;
+            for (int r = 0; r < 4; r++) {
+                if (r == col) continue;
+                float factor = M[r][col];
+                for (int j = 0; j < 8; j++) M[r][j] -= factor * M[col][j];
             }
         }
-        stride = Math.max(1, (total + p.maxSamples - 1) / p.maxSamples);
-        Samples s = new Samples(); s.pos = pos; s.nrm = nrm; s.n = n;
-        return s;
+        for (int i = 0; i < 4; i++) for (int j = 0; j < 4; j++) inv[i + j * 4] = M[i][j + 4];
+        return inv;
     }
 
-    private Result buildQuads(Params p, Samples s, float[] out) {
-        ByteBuffer bb = ByteBuffer.allocateDirect(Math.max(1, s.n) * 64).order(ByteOrder.nativeOrder());
-        int q = 0;
-        for (int i = 0; i < s.n; i++) {
-            float r = out[i * 4] * p.strength, g = out[i * 4 + 1] * p.strength, b = out[i * 4 + 2] * p.strength;
-            float mx = Math.max(r, Math.max(g, b));
-            if (mx < 0.004f) continue;
-            if (mx > 1f) { r /= mx; g /= mx; b /= mx; }
-            byte rb = (byte) (int) (r * 255f + 0.5f), gb = (byte) (int) (g * 255f + 0.5f), bbyte = (byte) (int) (b * 255f + 0.5f);
-            float nx = s.nrm[i * 4], ny = s.nrm[i * 4 + 1], nz = s.nrm[i * 4 + 2];
-            // pos = block center + n * 0.51 (0.01 outside the face); put the quad ON the face plane
-            // (0.003 proud of it). Using ~0.507 here placed it at the block CENTER instead, i.e. a
-            // full -0.5 block offset from the surface it decorates.
-            float cx = s.pos[i * 4] - nx * 0.007f, cy = s.pos[i * 4 + 1] - ny * 0.007f, cz = s.pos[i * 4 + 2] - nz * 0.007f;
-            float ux, uy, uz, vx, vy, vz;
-            if (Math.abs(ny) > 0.5f) { ux = 0.5f; uy = 0; uz = 0; vx = 0; vy = 0; vz = 0.5f; }
-            else if (Math.abs(nx) > 0.5f) { ux = 0; uy = 0.5f; uz = 0; vx = 0; vy = 0; vz = 0.5f; }
-            else { ux = 0.5f; uy = 0; uz = 0; vx = 0; vy = 0.5f; vz = 0; }
-            put(bb, cx - ux - vx, cy - uy - vy, cz - uz - vz, rb, gb, bbyte);
-            put(bb, cx + ux - vx, cy + uy - vy, cz + uz - vz, rb, gb, bbyte);
-            put(bb, cx + ux + vx, cy + uy + vy, cz + uz + vz, rb, gb, bbyte);
-            put(bb, cx - ux + vx, cy - uy + vy, cz - uz + vz, rb, gb, bbyte);
-            q++;
+    private static int[] captureAtlas() {
+        try {
+            Minecraft mc = Minecraft.getMinecraft();
+            net.minecraft.client.renderer.texture.AbstractTexture tex =
+                    mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+            int w = tex.getWidth(), h = tex.getHeight();
+            if (w <= 0 || h <= 0) return null;
+            int id = tex.getGlTextureId();
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, id);
+            java.nio.ByteBuffer buf = org.lwjgl.BufferUtils.createByteBuffer(w * h * 4);
+            GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
+            GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
+            int[] out = new int[w * h];
+            for (int i = 0; i < out.length; i++) {
+                int r = buf.get() & 0xFF;
+                int g = buf.get() & 0xFF;
+                int b = buf.get() & 0xFF;
+                int a = buf.get() & 0xFF;
+                out[i] = r | (g << 8) | (b << 16) | (a << 24);
+            }
+            return out;
+        } catch (Throwable t) {
+            return null;
         }
-        bb.flip();
-        Result res = new Result(); res.originX = p.ox; res.originZ = p.oz; res.quadCount = q; res.quads = bb;
-        return res;
     }
 
-    private static void put(ByteBuffer bb, float x, float y, float z, byte r, byte g, byte b) {
-        bb.putFloat(x).putFloat(y).putFloat(z).put(r).put(g).put(b).put((byte) -1);
-    }
-
-    // ------------------------------------------------------------------ immediate block updates
     private final class Listener implements IWorldEventListener {
         public void notifyBlockUpdate(World w, BlockPos pos, IBlockState oldState, IBlockState newState, int flags) {
-            vol.set(pos.getX(), pos.getY(), pos.getZ(), VoxelVolume.classify(newState));
+            vol.set(pos.getX(), pos.getY(), pos.getZ(), (short) (vol.palette != null ? vol.palette.idOf(newState) : 0));
+            // light update deferred (kernel reads vol.light; update via notifyLightSet)
         }
-        public void notifyLightSet(BlockPos pos) {}
+        public void notifyLightSet(BlockPos pos) {
+            // update light byte for this cell from the world
+            try {
+                World ww = Minecraft.getMinecraft().world;
+                if (ww == null) return;
+                net.minecraft.world.chunk.Chunk ch = ww.getChunkProvider().getLoadedChunk(pos.getX() >> 4, pos.getZ() >> 4);
+                if (ch == null) return;
+                int sky = ch.getLightFor(net.minecraft.world.EnumSkyBlock.SKY, pos);
+                int blk = ch.getLightFor(net.minecraft.world.EnumSkyBlock.BLOCK, pos);
+                vol.setLight(pos.getX(), pos.getY(), pos.getZ(), (byte) ((Math.min(15, sky) << 4) | Math.min(15, blk)));
+            } catch (Throwable ignore) {}
+        }
         public void markBlockRangeForRenderUpdate(int x1, int y1, int z1, int x2, int y2, int z2) {}
-        public void playSoundToAllNearExcept(EntityPlayer pl, SoundEvent s, SoundCategory c, double x, double y, double z, float v, float pi) {}
-        public void playRecord(SoundEvent s, BlockPos pos) {}
+        public void playSoundToAllNearExcept(net.minecraft.entity.player.EntityPlayer pl, net.minecraft.util.SoundEvent s, net.minecraft.util.SoundCategory c, double x, double y, double z, float v, float pi) {}
+        public void playRecord(net.minecraft.util.SoundEvent s, BlockPos pos) {}
         public void spawnParticle(int id, boolean ignoreRange, double x, double y, double z, double xs, double ys, double zs, int... params) {}
         public void spawnParticle(int id, boolean ignoreRange, boolean minimal, double x, double y, double z, double xs, double ys, double zs, int... params) {}
-        public void onEntityAdded(Entity e) {}
-        public void onEntityRemoved(Entity e) {}
+        public void onEntityAdded(net.minecraft.entity.Entity e) {}
+        public void onEntityRemoved(net.minecraft.entity.Entity e) {}
         public void broadcastSound(int soundID, BlockPos pos, int data) {}
-        public void playEvent(EntityPlayer pl, int type, BlockPos pos, int data) {}
+        public void playEvent(net.minecraft.entity.player.EntityPlayer pl, int type, BlockPos pos, int data) {}
         public void sendBlockBreakProgress(int breakerId, BlockPos pos, int progress) {}
     }
 }
