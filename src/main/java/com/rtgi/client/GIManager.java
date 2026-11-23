@@ -47,6 +47,8 @@ public final class GIManager {
     private volatile float[] lastProj, lastModel;
     private volatile float lastPartialTicks;
     private volatile int lastOriginX, lastOriginZ;
+    private volatile int[] cachedAtlas;
+    private volatile int cachedAtlasW = 256, cachedAtlasH = 256;
 
     public GIManager() { vol.palette = palette; }
 
@@ -100,6 +102,22 @@ public final class GIManager {
         GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, mb);
         pb.get(p); mb.get(m);
         lastProj = p; lastModel = m; lastPartialTicks = e.getPartialTicks();
+        // capture atlas on the render thread (GL context current)
+        int[] a = captureAtlas();
+        if (a != null) {
+            cachedAtlas = a;
+            // dims already set inside captureAtlas? recompute
+        }
+        // recompute dims
+        try {
+            net.minecraft.client.renderer.texture.AbstractTexture tex =
+                    (net.minecraft.client.renderer.texture.AbstractTexture) Minecraft.getMinecraft().getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+            int w = 256, h = 256;
+            try { w = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
+            try { h = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
+            if (w > 0) cachedAtlasW = w;
+            if (h > 0) cachedAtlasH = h;
+        } catch (Throwable ignore) {}
         RTResult r = pending.getAndSet(null);
         if (r != null) overlay.upload(r.color, r.w, r.h);
         overlay.draw();
@@ -162,18 +180,9 @@ public final class GIManager {
             }
             long t3 = System.nanoTime();
 
-            // atlas
-            int[] atlas = captureAtlas();
-            int atlasW = 256, atlasH = 256;
-            try {
-                net.minecraft.client.renderer.texture.AbstractTexture tex =
-                        (net.minecraft.client.renderer.texture.AbstractTexture) Minecraft.getMinecraft().getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
-                try { atlasW = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
-                try { atlasH = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
-                // fallback to fields
-                if (atlasW <= 0) { try { atlasW = tex.getClass().getField("width").getInt(tex); } catch (Throwable ignore) {} }
-                if (atlasH <= 0) { try { atlasH = tex.getClass().getField("height").getInt(tex); } catch (Throwable ignore) {} }
-            } catch (Throwable ignore) {}
+            // atlas (captured on render thread)
+            int[] atlas = cachedAtlas;
+            int atlasW = cachedAtlasW, atlasH = cachedAtlasH;
             if (atlas == null || atlas.length == 0) { atlas = new int[]{0}; atlasW = 1; atlasH = 1; }
 
             // render scale
