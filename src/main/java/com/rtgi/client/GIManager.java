@@ -246,6 +246,10 @@ public final class GIManager {
                         w, h, atlasW, atlasH,
                         hex(res.color[cy * w + cx]), hex(res.color[0 * w + cx]), hex(res.color[(h - 1) * w + cx]),
                         hex(res.color[cy * w + 0]), hex(res.color[cy * w + (w - 1)]));
+                LOG.info("RT mat: proj[0]={} proj[5]={} proj[10]={} proj[11]={} proj[14]={} proj[15]={} | model[0]={} model[5]={} model[10]={} model[12]={} model[13]={} model[14]={} | cam=({},{},{})",
+                        proj[0], proj[5], proj[10], proj[11], proj[14], proj[15],
+                        model[0], model[5], model[10], model[12], model[13], model[14],
+                        camx, camy, camz);
             }
         } catch (Throwable t) {
             LOG.error("RT GI pass failed", t);
