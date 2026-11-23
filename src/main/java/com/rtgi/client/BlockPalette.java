@@ -5,7 +5,7 @@ import net.minecraft.block.state.IBlockState;
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.renderer.block.model.IBakedModel;
 import net.minecraft.client.renderer.texture.TextureAtlasSprite;
-import net.minecraft.util.EnumBlockLayer;
+import net.minecraft.util.BlockRenderLayer;
 import net.minecraft.util.EnumFacing;
 import net.minecraft.util.ResourceLocation;
 
@@ -55,10 +55,10 @@ public final class BlockPalette {
         boolean full = false;
         try { full = st.isFullCube(); } catch (Throwable ignore) {}
         if (full) f |= F_FULL;
-        EnumBlockLayer layer = EnumBlockLayer.SOLID;
+        BlockRenderLayer layer = BlockRenderLayer.SOLID;
         try { layer = b.getRenderLayer(); } catch (Throwable ignore) {}
-        if (layer == EnumBlockLayer.CUTOUT || layer == EnumBlockLayer.CUTOUT_MIPPED) f |= F_CUTOUT;
-        if (layer == EnumBlockLayer.TRANSLUCENT) f |= F_TRANSL;
+        if (layer == BlockRenderLayer.CUTOUT || layer == BlockRenderLayer.CUTOUT_MIPPED) f |= F_CUTOUT;
+        if (layer == BlockRenderLayer.TRANSLUCENT) f |= F_TRANSL;
         boolean isWater = name.contains("water") || name.contains("flowing_water") || name.contains("fluid");
         if (isWater) f |= F_WATER;
         int lv = 0;
@@ -85,7 +85,7 @@ public final class BlockPalette {
         try {
             model = Minecraft.getMinecraft().getBlockRendererDispatcher().getBlockModelShapes().getModelForState(st);
         } catch (Throwable ignore) {}
-        Random rand = new Random(0);
+        long rand = 0L;
         EnumFacing[] faces = { EnumFacing.UP, EnumFacing.DOWN, EnumFacing.NORTH, EnumFacing.SOUTH, EnumFacing.EAST, EnumFacing.WEST };
         for (int fi = 0; fi < 6; fi++) {
             EnumFacing facing = faces[fi];

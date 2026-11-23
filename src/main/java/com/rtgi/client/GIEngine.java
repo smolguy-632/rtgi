@@ -142,8 +142,8 @@ public final class GIEngine {
         clSetKernelArg(kernel, a++, Sizeof.cl_mem, Pointer.to(bOutDepth));
 
         clEnqueueNDRangeKernel(queue, kernel, 1, null, new long[]{(long) outW * outH}, null, 0, null, null);
-        clEnqueueReadBuffer(queue, bOutColor.mem, true, 0, 4L * outColor.length, Pointer.to(outColor), 0, null, null);
-        clEnqueueReadBuffer(queue, bOutDepth.mem, true, 0, 4L * outDepth.length, Pointer.to(outDepth), 0, null, null);
+        clEnqueueReadBuffer(queue, bOutColor, true, 0, 4L * outColor.length, Pointer.to(outColor), 0, null, null);
+        clEnqueueReadBuffer(queue, bOutDepth, true, 0, 4L * outDepth.length, Pointer.to(outDepth), 0, null, null);
 
         Result r = new Result();
         r.w = outW; r.h = outH; r.color = outColor; r.depth = outDepth;

@@ -123,10 +123,10 @@ public final class GIManager {
                 int wy = 64;
                 try { wy = (int) Minecraft.getMinecraft().player.posY; } catch (Throwable ignore) {}
                 Biome biome = world.getBiome(new BlockPos(wx, wy, wz));
-                int grass = 0, foliage = 0, water = 0;
-                try { grass = net.minecraft.client.renderer.BiomeColors.getGrassColor(world, new BlockPos(wx, wy, wz)); } catch (Throwable ignore) {}
-                try { foliage = net.minecraft.client.renderer.BiomeColors.getFoliageColor(world, new BlockPos(wx, wy, wz)); } catch (Throwable ignore) {}
-                try { water = net.minecraft.client.renderer.BiomeColors.getWaterColor(world, new BlockPos(wx, wy, wz)); } catch (Throwable ignore) {}
+                int grass = 0x59AE30, foliage = 0x59AE30, water = 0x3F76E4;
+                try { grass = biome.grassColor; } catch (Throwable ignore) {}
+                try { foliage = biome.foliageColor; } catch (Throwable ignore) {}
+                try { water = biome.waterColor; } catch (Throwable ignore) {}
                 colTint[0 * 256 + slot] = grass;
                 colTint[1 * 256 + slot] = foliage;
                 colTint[2 * 256 + slot] = water;
@@ -165,12 +165,15 @@ public final class GIManager {
 
             // atlas
             int[] atlas = captureAtlas();
-            int atlasW = 1, atlasH = 1;
+            int atlasW = 256, atlasH = 256;
             try {
-                net.minecraft.client.renderer.texture.TextureMap tm =
-                        (net.minecraft.client.renderer.texture.TextureMap) Minecraft.getMinecraft().getTextureManager()
-                                .getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
-                atlasW = tm.getWidth(); atlasH = tm.getHeight();
+                net.minecraft.client.renderer.texture.AbstractTexture tex =
+                        Minecraft.getMinecraft().getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+                try { atlasW = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
+                try { atlasH = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
+                // fallback to fields
+                if (atlasW <= 0) { try { atlasW = tex.getClass().getField("width").getInt(tex); } catch (Throwable ignore) {} }
+                if (atlasH <= 0) { try { atlasH = tex.getClass().getField("height").getInt(tex); } catch (Throwable ignore) {} }
             } catch (Throwable ignore) {}
             if (atlas == null || atlas.length == 0) { atlas = new int[]{0}; atlasW = 1; atlasH = 1; }
 
