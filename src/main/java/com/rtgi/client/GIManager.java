@@ -94,30 +94,41 @@ public final class GIManager {
     @SubscribeEvent
     public void onRenderWorldLast(RenderWorldLastEvent e) {
         if (!RTGIConfig.enabled || disabled) return;
-        // capture matrices for next job
-        float[] p = new float[16], m = new float[16];
+        // capture projection from GL (reliable)
+        float[] p = new float[16];
         java.nio.FloatBuffer pb = org.lwjgl.BufferUtils.createFloatBuffer(16);
-        java.nio.FloatBuffer mb = org.lwjgl.BufferUtils.createFloatBuffer(16);
         GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, pb);
-        GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, mb);
-        pb.get(p); mb.get(m);
-        lastProj = p; lastModel = m; lastPartialTicks = e.getPartialTicks();
+        pb.get(p);
+        lastProj = p; lastPartialTicks = e.getPartialTicks();
+
+        // build a rotation-only modelview from the player yaw/pitch.
+        // (GL fixed-function modelview is unreliable under Celeritas / may be stale.)
+        try {
+            float pt = e.getPartialTicks();
+            net.minecraft.entity.Entity rv = (Minecraft.getMinecraft().getRenderViewEntity() != null)
+                    ? Minecraft.getMinecraft().getRenderViewEntity() : Minecraft.getMinecraft().player;
+            float yaw = rv.prevRotationYaw + (rv.rotationYaw - rv.prevRotationYaw) * pt;
+            float pitch = rv.prevRotationPitch + (rv.rotationPitch - rv.prevRotationPitch) * pt;
+            double yr = Math.toRadians(yaw + 180.0);
+            double pr = Math.toRadians(pitch);
+            float cosP = (float) Math.cos(pr), sinP = (float) Math.sin(pr);
+            float cosY = (float) Math.cos(yr), sinY = (float) Math.sin(yr);
+            // R_x(pitch) * R_y(yaw+180), column-major
+            float[] rx = new float[]{1,0,0,0, 0,cosP,sinP,0, 0,-sinP,cosP,0, 0,0,0,1};
+            float[] ry = new float[]{cosY,0,-sinY,0, 0,1,0,0, sinY,0,cosY,0, 0,0,0,1};
+            lastModel = mulMat4(rx, ry); // rotation only, no translation (eye added in kernel)
+        } catch (Throwable t) {
+            // fallback: identity
+            float[] id = new float[16]; for (int i = 0; i < 4; i++) id[i*4+i] = 1f;
+            lastModel = id;
+        }
         // capture atlas on the render thread (GL context current)
         int[] a = captureAtlas();
         if (a != null) {
             cachedAtlas = a;
-            // dims already set inside captureAtlas? recompute
         }
-        // recompute dims
-        try {
-            net.minecraft.client.renderer.texture.AbstractTexture tex =
-                    (net.minecraft.client.renderer.texture.AbstractTexture) Minecraft.getMinecraft().getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
-            int w = 256, h = 256;
-            try { w = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
-            try { h = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
-            if (w > 0) cachedAtlasW = w;
-            if (h > 0) cachedAtlasH = h;
-        } catch (Throwable ignore) {}
+        if (cachedAtlasW <= 0) cachedAtlasW = 512;
+        if (cachedAtlasH <= 0) cachedAtlasH = 512;
         RTResult r = pending.getAndSet(null);
         if (r != null) overlay.upload(r.color, r.w, r.h);
         overlay.draw();
@@ -301,18 +312,11 @@ public final class GIManager {
         return inv;
     }
 
-    private static int[] captureAtlas() {
+    private int[] captureAtlas() {
         try {
             Minecraft mc = Minecraft.getMinecraft();
             net.minecraft.client.renderer.texture.TextureMap tm =
                     (net.minecraft.client.renderer.texture.TextureMap) mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
-            int w = 256, h = 256;
-            try { w = (Integer) tm.getClass().getMethod("getWidth").invoke(tm); } catch (Throwable ignore) {}
-            try { h = (Integer) tm.getClass().getMethod("getHeight").invoke(tm); } catch (Throwable ignore) {}
-            if (w <= 0) { try { w = tm.getClass().getField("width").getInt(tm); } catch (Throwable ignore) {} }
-            if (h <= 0) { try { h = tm.getClass().getField("height").getInt(tm); } catch (Throwable ignore) {} }
-            if (w <= 0 || h <= 0) return null;
-            int[] out = new int[w * h];
 
             java.util.Collection<net.minecraft.client.renderer.texture.TextureAtlasSprite> sprites = null;
             try {
@@ -332,6 +336,23 @@ public final class GIManager {
             }
             if (sprites == null) return null;
 
+            int w = 0, h = 0;
+            for (net.minecraft.client.renderer.texture.TextureAtlasSprite spr : sprites) {
+                int ox = 0, oy = 0, sw = 0, sh = 0;
+                try { ox = spr.getOriginX(); } catch (Throwable ignore) {}
+                try { oy = spr.getOriginY(); } catch (Throwable ignore) {}
+                try { sw = spr.getIconWidth(); } catch (Throwable ignore) {}
+                try { sh = spr.getIconHeight(); } catch (Throwable ignore) {}
+                w = Math.max(w, ox + sw);
+                h = Math.max(h, oy + sh);
+            }
+            if (w <= 0 || h <= 0) return null;
+            int rw = 1; while (rw < w) rw <<= 1;
+            int rh = 1; while (rh < h) rh <<= 1;
+            if (rw < 16) rw = 16; if (rh < 16) rh = 16;
+            w = rw; h = rh;
+
+            int[] out = new int[w * h];
             for (net.minecraft.client.renderer.texture.TextureAtlasSprite spr : sprites) {
                 int ox = 0, oy = 0, sw = 0, sh = 0;
                 try { ox = spr.getOriginX(); } catch (Throwable ignore) {}
@@ -352,6 +373,8 @@ public final class GIManager {
                     }
                 }
             }
+            cachedAtlasW = w;
+            cachedAtlasH = h;
             return out;
         } catch (Throwable t) {
             return null;
