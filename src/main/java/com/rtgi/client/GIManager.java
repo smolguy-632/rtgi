@@ -261,6 +261,7 @@ public final class GIManager {
                         proj[0], proj[5], proj[10], proj[11], proj[14], proj[15],
                         model[0], model[5], model[10], model[12], model[13], model[14],
                         camx, camy, camz);
+                LOG.info("RT invVP[0..3]={} {} {} {} invVP[12..15]={} {} {} {}", invVP[0], invVP[1], invVP[2], invVP[3], invVP[12], invVP[13], invVP[14], invVP[15]);
             }
         } catch (Throwable t) {
             LOG.error("RT GI pass failed", t);
