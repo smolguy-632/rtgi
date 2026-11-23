@@ -146,7 +146,6 @@ public final class GIEngine {
         java.nio.ByteBuffer dbuf = org.lwjgl.BufferUtils.createByteBuffer(outDepth.length * 4);
         clEnqueueReadBuffer(queue, bOutColor, true, 0, 4L * outColor.length, Pointer.to(cbuf), 0, null, null);
         clEnqueueReadBuffer(queue, bOutDepth, true, 0, 4L * outDepth.length, Pointer.to(dbuf), 0, null, null);
-        cbuf.flip(); dbuf.flip();
         java.nio.IntBuffer ci = cbuf.asIntBuffer();
         java.nio.FloatBuffer di = dbuf.asFloatBuffer();
         for (int i = 0; i < outColor.length; i++) outColor[i] = ci.get(i);
