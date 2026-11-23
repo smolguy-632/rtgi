@@ -116,7 +116,7 @@ public final class GIManager {
             // R_x(pitch) * R_y(yaw+180), column-major
             float[] rx = new float[]{1,0,0,0, 0,cosP,sinP,0, 0,-sinP,cosP,0, 0,0,0,1};
             float[] ry = new float[]{cosY,0,-sinY,0, 0,1,0,0, sinY,0,cosY,0, 0,0,0,1};
-            lastModel = mulMat4(rx, ry); // rotation only, no translation (eye added in kernel)
+            lastModel = mulMat4(ry, rx); // rotation only, no translation (eye added in kernel) [MC order: R_y then R_x]
         } catch (Throwable t) {
             // fallback: identity
             float[] id = new float[16]; for (int i = 0; i < 4; i++) id[i*4+i] = 1f;
