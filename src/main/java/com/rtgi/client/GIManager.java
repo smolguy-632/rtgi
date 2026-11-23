@@ -280,7 +280,11 @@ public final class GIManager {
             Minecraft mc = Minecraft.getMinecraft();
             net.minecraft.client.renderer.texture.AbstractTexture tex =
                     (net.minecraft.client.renderer.texture.AbstractTexture) mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
-            int w = tex.getWidth(), h = tex.getHeight();
+            int w = 256, h = 256;
+            try { w = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
+            try { h = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
+            if (w <= 0) { try { w = tex.getClass().getField("width").getInt(tex); } catch (Throwable ignore) {} }
+            if (h <= 0) { try { h = tex.getClass().getField("height").getInt(tex); } catch (Throwable ignore) {} }
             if (w <= 0 || h <= 0) return null;
             int id = tex.getGlTextureId();
             GL11.glBindTexture(GL11.GL_TEXTURE_2D, id);
