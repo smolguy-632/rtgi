@@ -240,6 +240,12 @@ public final class GIManager {
             if (RTGIConfig.debugLog) {
                 LOG.info("RT pass: tree {}ms ({} nodes), colTint {}ms, emitters {}ms ({}), gpu+read {}ms, upload-pending",
                         (t1 - t0) / 1e6, tree.nodeCount, (t2 - t1) / 1e6, (t3 - t2) / 1e6, emitterCount, (t5 - t4) / 1e6);
+                int w = res.w, h = res.h;
+                int cx = w / 2, cy = h / 2;
+                LOG.info("RT px: size {}x{} atlas {}x{} center={} top={} bot={} left={} right={}",
+                        w, h, atlasW, atlasH,
+                        hex(res.color[cy * w + cx]), hex(res.color[0 * w + cx]), hex(res.color[(h - 1) * w + cx]),
+                        hex(res.color[cy * w + 0]), hex(res.color[cy * w + (w - 1)]));
             }
         } catch (Throwable t) {
             LOG.error("RT GI pass failed", t);
@@ -247,6 +253,10 @@ public final class GIManager {
         } finally {
             busy.set(false);
         }
+    }
+
+    private static String hex(int v) {
+        return String.format("#%06X", v & 0xFFFFFF);
     }
 
     private static float[] mulMat4(float[] a, float[] b) {
