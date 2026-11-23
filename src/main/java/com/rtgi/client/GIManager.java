@@ -290,26 +290,53 @@ public final class GIManager {
     private static int[] captureAtlas() {
         try {
             Minecraft mc = Minecraft.getMinecraft();
-            net.minecraft.client.renderer.texture.AbstractTexture tex =
-                    (net.minecraft.client.renderer.texture.AbstractTexture) mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+            net.minecraft.client.renderer.texture.TextureMap tm =
+                    (net.minecraft.client.renderer.texture.TextureMap) mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
             int w = 256, h = 256;
-            try { w = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
-            try { h = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
-            if (w <= 0) { try { w = tex.getClass().getField("width").getInt(tex); } catch (Throwable ignore) {} }
-            if (h <= 0) { try { h = tex.getClass().getField("height").getInt(tex); } catch (Throwable ignore) {} }
+            try { w = (Integer) tm.getClass().getMethod("getWidth").invoke(tm); } catch (Throwable ignore) {}
+            try { h = (Integer) tm.getClass().getMethod("getHeight").invoke(tm); } catch (Throwable ignore) {}
+            if (w <= 0) { try { w = tm.getClass().getField("width").getInt(tm); } catch (Throwable ignore) {} }
+            if (h <= 0) { try { h = tm.getClass().getField("height").getInt(tm); } catch (Throwable ignore) {} }
             if (w <= 0 || h <= 0) return null;
-            int id = tex.getGlTextureId();
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, id);
-            java.nio.ByteBuffer buf = org.lwjgl.BufferUtils.createByteBuffer(w * h * 4);
-            GL11.glGetTexImage(GL11.GL_TEXTURE_2D, 0, GL11.GL_RGBA, GL11.GL_UNSIGNED_BYTE, buf);
-            GL11.glBindTexture(GL11.GL_TEXTURE_2D, 0);
             int[] out = new int[w * h];
-            for (int i = 0; i < out.length; i++) {
-                int r = buf.get() & 0xFF;
-                int g = buf.get() & 0xFF;
-                int b = buf.get() & 0xFF;
-                int a = buf.get() & 0xFF;
-                out[i] = r | (g << 8) | (b << 16) | (a << 24);
+
+            java.util.Collection<net.minecraft.client.renderer.texture.TextureAtlasSprite> sprites = null;
+            try {
+                Object o = tm.getClass().getMethod("getTextures").invoke(tm);
+                if (o instanceof java.util.Collection) sprites = (java.util.Collection<net.minecraft.client.renderer.texture.TextureAtlasSprite>) o;
+            } catch (Throwable ignore) {}
+            if (sprites == null) {
+                for (java.lang.reflect.Field f : tm.getClass().getDeclaredFields()) {
+                    if (!java.util.Map.class.isAssignableFrom(f.getType())) continue;
+                    f.setAccessible(true);
+                    Object o = f.get(tm);
+                    if (!(o instanceof java.util.Map)) continue;
+                    java.util.Collection vals = ((java.util.Map<?, ?>) o).values();
+                    if (vals.isEmpty()) continue;
+                    if (vals.iterator().next() instanceof net.minecraft.client.renderer.texture.TextureAtlasSprite) { sprites = vals; break; }
+                }
+            }
+            if (sprites == null) return null;
+
+            for (net.minecraft.client.renderer.texture.TextureAtlasSprite spr : sprites) {
+                int ox = 0, oy = 0, sw = 0, sh = 0;
+                try { ox = spr.getOriginX(); } catch (Throwable ignore) {}
+                try { oy = spr.getOriginY(); } catch (Throwable ignore) {}
+                try { sw = spr.getIconWidth(); } catch (Throwable ignore) {}
+                try { sh = spr.getIconHeight(); } catch (Throwable ignore) {}
+                if (sw <= 0 || sh <= 0) continue;
+                int[][] data = null;
+                try { data = spr.getFrameTextureData(0); } catch (Throwable ignore) {}
+                if (data == null || data.length == 0 || data[0] == null) continue;
+                int[] px = data[0];
+                if (px.length < sw * sh) continue;
+                for (int yy = 0; yy < sh; yy++) {
+                    for (int xx = 0; xx < sw; xx++) {
+                        int dx = ox + xx, dy = oy + yy;
+                        if (dx < 0 || dy < 0 || dx >= w || dy >= h) continue;
+                        out[dy * w + dx] = px[yy * sw + xx];
+                    }
+                }
             }
             return out;
         } catch (Throwable t) {
