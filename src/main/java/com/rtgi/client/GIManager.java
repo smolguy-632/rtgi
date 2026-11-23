@@ -122,11 +122,7 @@ public final class GIManager {
                 int wx = ox + sx * 16 + 8, wz = oz + sz * 16 + 8;
                 int wy = 64;
                 try { wy = (int) Minecraft.getMinecraft().player.posY; } catch (Throwable ignore) {}
-                Biome biome = world.getBiome(new BlockPos(wx, wy, wz));
                 int grass = 0x59AE30, foliage = 0x59AE30, water = 0x3F76E4;
-                try { grass = biome.grassColor; } catch (Throwable ignore) {}
-                try { foliage = biome.foliageColor; } catch (Throwable ignore) {}
-                try { water = biome.waterColor; } catch (Throwable ignore) {}
                 colTint[0 * 256 + slot] = grass;
                 colTint[1 * 256 + slot] = foliage;
                 colTint[2 * 256 + slot] = water;
@@ -168,7 +164,7 @@ public final class GIManager {
             int atlasW = 256, atlasH = 256;
             try {
                 net.minecraft.client.renderer.texture.AbstractTexture tex =
-                        Minecraft.getMinecraft().getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+                        (net.minecraft.client.renderer.texture.AbstractTexture) Minecraft.getMinecraft().getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
                 try { atlasW = (Integer) tex.getClass().getMethod("getWidth").invoke(tex); } catch (Throwable ignore) {}
                 try { atlasH = (Integer) tex.getClass().getMethod("getHeight").invoke(tex); } catch (Throwable ignore) {}
                 // fallback to fields
@@ -283,7 +279,7 @@ public final class GIManager {
         try {
             Minecraft mc = Minecraft.getMinecraft();
             net.minecraft.client.renderer.texture.AbstractTexture tex =
-                    mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
+                    (net.minecraft.client.renderer.texture.AbstractTexture) mc.getTextureManager().getTexture(net.minecraft.client.renderer.texture.TextureMap.LOCATION_BLOCKS_TEXTURE);
             int w = tex.getWidth(), h = tex.getHeight();
             if (w <= 0 || h <= 0) return null;
             int id = tex.getGlTextureId();
