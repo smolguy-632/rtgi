@@ -94,8 +94,11 @@ public final class GIManager {
         if (!RTGIConfig.enabled || disabled) return;
         // capture matrices for next job
         float[] p = new float[16], m = new float[16];
-        GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, java.nio.FloatBuffer.wrap(p));
-        GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, java.nio.FloatBuffer.wrap(m));
+        java.nio.FloatBuffer pb = org.lwjgl.BufferUtils.createFloatBuffer(16);
+        java.nio.FloatBuffer mb = org.lwjgl.BufferUtils.createFloatBuffer(16);
+        GL11.glGetFloat(GL11.GL_PROJECTION_MATRIX, pb);
+        GL11.glGetFloat(GL11.GL_MODELVIEW_MATRIX, mb);
+        pb.get(p); mb.get(m);
         lastProj = p; lastModel = m; lastPartialTicks = e.getPartialTicks();
         RTResult r = pending.getAndSet(null);
         if (r != null) overlay.upload(r.color, r.w, r.h);
